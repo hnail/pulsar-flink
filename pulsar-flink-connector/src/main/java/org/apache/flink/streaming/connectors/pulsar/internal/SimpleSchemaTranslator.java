@@ -14,6 +14,7 @@
 
 package org.apache.flink.streaming.connectors.pulsar.internal;
 
+import com.google.protobuf.Descriptors;
 import org.apache.flink.table.api.DataTypes;
 import org.apache.flink.table.api.TableSchema;
 import org.apache.flink.table.types.AtomicDataType;
@@ -28,6 +29,7 @@ import org.apache.flink.table.types.utils.TypeConversions;
 
 import org.apache.pulsar.client.api.schema.GenericRecord;
 import org.apache.pulsar.client.api.schema.GenericSchema;
+import org.apache.pulsar.client.impl.schema.generic.GenericProtobufNativeSchema;
 import org.apache.pulsar.common.schema.SchemaInfo;
 import org.apache.pulsar.common.schema.SchemaType;
 import org.apache.pulsar.shade.com.google.common.collect.ImmutableList;
@@ -313,9 +315,80 @@ public class SimpleSchemaTranslator extends SchemaTranslator {
                 Schema avroSchema =
                         new Schema.Parser().parse(new String(si.getSchema(), StandardCharsets.UTF_8));
                 return avro2SqlType(avroSchema, Collections.emptySet());
+            case PROTOBUF_NATIVE:
+                Descriptors.Descriptor descriptor =
+                        ((GenericProtobufNativeSchema) GenericProtobufNativeSchema.of(si)).getProtobufNativeSchema();
+                return proto2SqlType(descriptor);
             default:
                 throw new UnsupportedOperationException(String.format("We do not support %s currently.", si.getType()));
         }
+    }
+
+    private static DataType proto2SqlType(Descriptors.Descriptor descriptor) throws
+            IncompatibleSchemaException {
+        List<DataTypes.Field> fields = new ArrayList<>();
+        List<Descriptors.FieldDescriptor> protoFields = descriptor.getFields();
+
+        for (Descriptors.FieldDescriptor fieldDescriptor : protoFields) {
+            DataType fieldType = proto2SqlType(fieldDescriptor);
+            fields.add(DataTypes.FIELD(fieldDescriptor.getName(), fieldType));
+        }
+
+        if (fields.isEmpty()) {
+            throw new RuntimeException("No FieldDescriptors found");
+        }
+        return DataTypes.ROW(fields.toArray(new DataTypes.Field[0]));
+    }
+
+    private static DataType proto2SqlType(Descriptors.FieldDescriptor field) throws
+            IncompatibleSchemaException {
+        Descriptors.FieldDescriptor.JavaType type = field.getJavaType();
+        DataType dataType;
+        switch (type) {
+            case BOOLEAN:
+                dataType = DataTypes.BOOLEAN();
+                break;
+            case BYTE_STRING:
+                dataType = DataTypes.BYTES();
+                break;
+            case DOUBLE:
+                dataType = DataTypes.DOUBLE();
+                break;
+            case ENUM:
+                dataType = DataTypes.STRING();
+                break;
+            case FLOAT:
+                dataType = DataTypes.FLOAT();
+                break;
+            case INT:
+                dataType = DataTypes.INT();
+                break;
+            case LONG:
+                dataType = DataTypes.BIGINT();
+                break;
+            case MESSAGE:
+                Descriptors.Descriptor msg = field.getMessageType();
+                if (field.isMapField()) {
+                    //map
+                    dataType = DataTypes.MAP(proto2SqlType(msg.findFieldByName("key")), proto2SqlType(
+                            msg.findFieldByName("value")));
+                } else {
+                    //row
+                    dataType = proto2SqlType(field.getMessageType());
+                }
+                break;
+            case STRING:
+                dataType = DataTypes.STRING();
+                break;
+            default:
+                throw new RuntimeException("Unknown type: " + type.toString() + " for FieldDescriptor: " + field.toString());
+        }
+        //list
+        if (field.isRepeated() && !field.isMapField()) {
+            dataType = DataTypes.ARRAY(dataType);
+        }
+
+        return dataType;
     }
 
     private static DataType avro2SqlType(Schema avroSchema, Set<String> existingRecordNames) throws
